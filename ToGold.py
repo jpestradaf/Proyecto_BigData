@@ -28,21 +28,22 @@ def silver_to_gold():
     # Ventas detalladas
     detailed_sales_df = silver_df.select(
         "order_id", 
-        "customer_id", 
+        # "customer_id", 
         "customer_name", 
-        "customer_phone", 
-        "customer_email", 
-        "customer_address", 
-        "employee_id", 
+        # "customer_phone", 
+        # "customer_email", 
+        # "customer_address", 
+        # "employee_id", 
         "employee_name", 
-        "employee_phone", 
-        "employee_email", 
-        "employee_address", 
+        # "employee_phone", 
+        # "employee_email", 
+        # "employee_address", 
         "employee_commission", 
+        "latitude",
+        "longitude",
         "commune", 
         "neighborhood", 
         "quantity_products", 
-        "sale_value", 
         "event_date"
     )
 
