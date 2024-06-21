@@ -45,9 +45,9 @@ while True:
     writing_df.stop()
     if static_df.count() > 50:
         now = datetime.now()
-        now = now.strftime("%d_%m_%Y__%H_%M_%S")
+        now = now.strftime("%d%m%Y%H%M%S")
         ruta = '/raw/new/data_raw_'+now+'.parquet'
         print(ruta)
-        static_df.write.mode('append').parquet(ruta)
+        static_df.write.mode('overwrite').parquet(ruta)
         static_df = spark.createDataFrame([], static_schema)
     time.sleep(30)
