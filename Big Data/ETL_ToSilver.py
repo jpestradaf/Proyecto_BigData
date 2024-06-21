@@ -1,55 +1,79 @@
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from pyspark.sql.types import *
 from datetime import datetime
 import subprocess
-import os
-from pyspark.sql.functions import col, lit, unix_timestamp, from_unixtime
 
-# Crear sesión de Spark
-spark = SparkSession.builder \
-    .appName("Data Enrichment") \
-    .config("spark.hadoop.fs.defaultFS", "hdfs://localhost:9000") \
-    .getOrCreate()
+def raw_to_silver():
+    # Crear sesión de Spark
+    spark = SparkSession \
+        .builder \
+        .appName("Silver Zone Creation") \
+        .master("local[*]") \
+        .getOrCreate()
 
-# Leer datos de la zona Bronze
-bronze_df = spark.read.json("hdfs://localhost:9000/bronze/bronze_zone_data.json")
-#--------------------------------------------------------OJO, SI ES PARQUET, CAMBIARLO
+    # Definir la ruta base en HDFS
+    hdfs_base_path = 'hdfs://localhost:9000'
 
+    # Leer cada archivo Parquet
+    #df_50001 = spark.read.parquet(hdfs_base_path + '/data/50001.parquet')
+    #df_customers = spark.read.parquet(hdfs_base_path + '/data/customers.parquet')
+    df_data_raw = spark.read.parquet(hdfs_base_path + '/raw/new/*.parquet')
+    #df_employees = spark.read.parquet(hdfs_base_path + '/data/employees.parquet')
+    df_neighborhoods = spark.read.parquet(hdfs_base_path + '/data/medellin_neighborhoods.parquet')
 
-# Leer datos complementarios
-customers_df = spark.read.parquet("hdfs://localhost:9000/data/customers.parquet")
-employees_df = spark.read.parquet("hdfs://localhost:9000/data/employees.parquet")
-neighborhoods_df = spark.read.parquet("hdfs://localhost:9000/data/neighborhoods.parquet")
+    # Crear la base de datos bronze si no existe
+    #spark.sql("CREATE DATABASE IF NOT EXISTS bronze")
+    # Guardar los datos como una tabla en la base de datos bronze
+    #df_data_raw.write.mode('append').saveAsTable('bronze.almacenamiento_bronze')
 
+    df_silver = df_data_raw.withColumn("event_date", to_timestamp(col("date"), "dd/MM/yyyy HH:mm:ss")) \
+        .withColumn("partition_date", date_format(col("event_date"), "ddMMyyyy")) \
+        .withColumn("event_day", dayofmonth(col("event_date"))) \
+        .withColumn("event_hour", hour(col("event_date"))) \
+        .withColumn("event_minute", minute(col("event_date"))) \
+        .withColumn("event_month", month(col("event_date"))) \
+        .withColumn("event_second", second(col("event_date"))) \
+        .withColumn("event_year", year(col("event_date"))) \
+        .withColumnRenamed("order_id", "order_id") \
+        .withColumnRenamed("employee_id", "employee_id") \
+        .withColumnRenamed("quantity_products", "quantity_products") \
+        .withColumnRenamed("latitude", "latitude") \
+        .withColumnRenamed("longitude", "longitude") \
+        .withColumnRenamed("customer_id", "customer_id")
 
-# Función para encontrar la comuna y barrio a partir de las coordenadas    
-'''
-    #1. GENERAR PUNTO
-    #2. MAPEO QUE ENCUENTRA LA FILA CORRESPONDIENTE PARA EL BARRIO Y COMUNA(JOIN)
-    #3. PEGAR LOS DATOS ENCONTRADOS 
-'''
-def find_neighborhood(latitude, longitude): #ESTO NO SIRVE AUN, METER GEOSPARK
-    return neighborhoods_df \
-        .filter((col("latitude") == latitude) & (col("longitude") == longitude)) \
-        .select("commune", "neighborhood") \
-        .collect()
+    # Eliminar la columna original de fecha si no es necesaria
+    df_silver = df_silver.drop("date")
 
+    # Seleccionar solo las columnas NOMBRE e IDENTIFICACION de df_neighborhoods, y renombrar OBJECTID a object_id
+    df_neighborhoods_seleccionado = df_neighborhoods.select(
+        col("OBJECTID").alias("object_id"),
+        col("NOMBRE").alias("neighborhood"),
+        col("IDENTIFICACION").alias("commune")
+    )
 
-# Enriquecer datos
-silver_df = bronze_df \
-    .withColumn("event_date", from_unixtime(unix_timestamp(col("date"), "MM/dd/yyyy HH:mm:ss"))) \
-    .withColumn("partition_date", from_unixtime(unix_timestamp(col("date"), "MM/dd/yyyy"), "yyyyMMdd")) \
-    .withColumn("event_year", col("event_date").cast("string").substr(0, 4).cast("int")) \
-    .withColumn("event_month", col("event_date").cast("string").substr(6, 2).cast("int")) \
-    .withColumn("event_day", col("event_date").cast("string").substr(9, 2).cast("int")) \
-    .withColumn("event_hour", col("event_date").cast("string").substr(12, 2).cast("int")) \
-    .withColumn("event_minute", col("event_date").cast("string").substr(15, 2).cast("int")) \
-    .withColumn("event_second", col("event_date").cast("string").substr(18, 2).cast("int"))
+    # Realizar el left join en la columna object_id
+    df_resultado = df_silver.join(
+        df_neighborhoods_seleccionado,
+        df_silver['object_id'] == df_neighborhoods_seleccionado['object_id'],
+        "left"
+    ).select(
+        df_silver['*'],  # Seleccionar todas las columnas de df_silver
+        df_neighborhoods_seleccionado['neighborhood'],  # Seleccionar la columna renombrada neighborhood
+        df_neighborhoods_seleccionado['commune']  # Seleccionar la columna renombrada commune
+    ).drop(df_silver['object_id'])  # Eliminar la columna object_id del resultado final
 
-# Agregar comuna y barrio
-for row in silver_df.collect():
-    neighborhood_info = find_neighborhood(row["latitude"], row["longitude"])
-    silver_df = silver_df.withColumn("commune", lit(neighborhood_info[0]["commune"])) \
-                         .withColumn("neighborhood", lit(neighborhood_info[0]["neighborhood"]))
+    # Guardar datos procesados en la zona Silver
+    current_time = datetime.now().strftime("%Y%m%d%H%M%S")
+    output_path = "/silver/new/data_silver_"+current_time+".parquet"
+    df_resultado.write.mode('overwrite').parquet(output_path)
 
-# Guardar datos enriquecidos en la zona Silver
-silver_df.write.mode('overwrite').parquet("hdfs://localhost:9000/silver/silver_zone_data.parquet")
+    # Mover a carpeta de procesados
+    src_path = "/raw/new/*.parquet"
+    dest_path = "/raw/processed/"
+    cmd = f"hdfs dfs -mv {src_path} {dest_path}"
+    result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Detener sesión de Spark
+    spark.stop()
+
+raw_to_silver()
