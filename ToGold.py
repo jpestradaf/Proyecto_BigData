@@ -1,5 +1,6 @@
 from pyspark.sql import SparkSession
 from datetime import datetime
+import subprocess
 import os
 
 def silver_to_gold():
@@ -10,9 +11,13 @@ def silver_to_gold():
         .getOrCreate()
 
     # Leer datos de la zona Silver
-    silver_path = "hdfs://namenode:9000/silver/new"
+    silver_path = "hdfs://namenode:9000/silver/new/*.parquet"
     silver_df = spark.read.parquet(silver_path)
 
+    # Crear las tablas en SQL en gold
+    spark.sql("CREATE DATABASE IF NOT EXISTS silver")
+    detailed_sales_df.write.mode('append').saveAsTable('silver.almacenamiento_silver')
+    
     # Leer datos complementarios
     customers_df = spark.read.parquet("hdfs://namenode:9000/data/customers.parquet")
     employees_df = spark.read.parquet("hdfs://namenode:9000/data/employees.parquet")
@@ -54,18 +59,28 @@ def silver_to_gold():
     # Guardar datos procesados en la zona Gold
     detailed_sales_df.write.mode('overwrite').parquet(output_path)
 
-    # Mover archivos de silver/new a silver/processed
-    processed_path = "hdfs://namenode:9000/silver/processed"
-
-    # Listar los archivos en la ruta silver/new
-    fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
-    files_to_move = fs.listStatus(spark._jvm.org.apache.hadoop.fs.Path(silver_path))
+    # Crear las tablas en SQL en gold
+    spark.sql("CREATE DATABASE IF NOT EXISTS gold")
+    detailed_sales_df.write.mode('append').saveAsTable('gold.almacenamiento_gold')
 
     # Mover cada archivo
-    for file in files_to_move:
-        old_path = file.getPath()
-        new_path = spark._jvm.org.apache.hadoop.fs.Path(os.path.join(processed_path, old_path.getName()))
-        fs.rename(old_path, new_path)
+    src_path = "hdfs://namenode:9000/silver/new/*.parquet"
+    dest_path = "hdfs://namenode:9000/silver/processed/"
+    cmd = f"hdfs dfs -mv {src_path} {dest_path}"
+    result = subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    # Mover archivos de silver/new a silver/processed
+    #processed_path = "hdfs://namenode:9000/silver/processed"
+
+    # Listar los archivos en la ruta silver/new
+    #fs = spark._jvm.org.apache.hadoop.fs.FileSystem.get(spark._jsc.hadoopConfiguration())
+    #files_to_move = fs.listStatus(spark._jvm.org.apache.hadoop.fs.Path(silver_path))
+
+    # Mover cada archivo
+    #for file in files_to_move:
+        #old_path = file.getPath()
+        #new_path = spark._jvm.org.apache.hadoop.fs.Path(os.path.join(processed_path, old_path.getName()))
+        #fs.rename(old_path, new_path)
 
     # Detener sesión de Spark
     spark.stop()
